@@ -218,7 +218,8 @@ function estadoPrestamo(l){
 function crearPrestamo(d){
   const loan={id:uid(),nombre:d.nombre,telefono:d.telefono||"",categoria:d.categoria||"General",monto:d.monto,tasa:d.tasa,
     moraPct:d.moraPct||0,frecuencia:d.frecuencia,fechaInicio:d.fechaInicio,nota:d.nota||"",saldo:d.monto,
-    proximoPago:nextDate(d.fechaInicio,d.frecuencia),estado:"activo",pagos:[]};
+    proximoPago:nextDate(d.fechaInicio,d.frecuencia),estado:"activo",pagos:[],plazo:d.plazo||0,
+    fechaLimite:d.plazo>0?addPeriodos(d.fechaInicio,d.frecuencia,d.plazo):"",eventos:[]};
   loans.push(loan);saveLoans();return loan;
 }
 // Primero cubre mora, luego interés; el resto va a capital. Si no alcanza, la diferencia se suma al saldo.
@@ -231,6 +232,30 @@ function registrarPago(id,monto,fecha){
   loan.saldo=nuevo;
   if(nuevo<=0)loan.estado="pagado";else loan.proximoPago=nextDate(loan.proximoPago,loan.frecuencia);
   saveLoans();return loan;
+}
+function addPeriodos(iso,f,n){if(f==="semanal")return addDaysISO(iso,7*n);if(f==="quincenal")return addDaysISO(iso,15*n);return addMonthsISO(iso,n);}
+function plazoVencido(l){return l.estado==="activo"&&!!l.fechaLimite&&daysUntil(l.fechaLimite)<0;}
+function periodosRestantes(l){if(!l.fechaLimite)return null;let n=0,d=l.proximoPago;
+  while(d<=l.fechaLimite&&n<600){n++;d=nextDate(d,l.frecuencia);}return n;}
+// Cuota fija que saldaría el saldo justo al terminar el plazo.
+function cuotaSugerida(l){const n=periodosRestantes(l);if(!n)return null;const r=l.tasa/100;
+  return r===0?l.saldo/n:l.saldo*r/(1-Math.pow(1+r,-n));}
+function extenderPlazo(id,n){
+  const l=loans.find(x=>x.id===id);if(!l)return;
+  const base=l.fechaLimite?(daysUntil(l.fechaLimite)>=0?l.fechaLimite:todayISO()):addPeriodos(l.proximoPago,l.frecuencia,-1);
+  l.fechaLimite=addPeriodos(base,l.frecuencia,n);l.plazo=(l.plazo||0)+n;
+  (l.eventos=l.eventos||[]).push({fecha:todayISO(),texto:"Plazo extendido "+n+" pago(s) hasta "+fechaLegible(l.fechaLimite)});
+  saveLoans();
+}
+// Refinanciar: suma dinero nuevo (opcional), cambia condiciones y reinicia fechas desde hoy.
+function refinanciar(id,d){
+  const l=loans.find(x=>x.id===id);if(!l)return;
+  l.saldo+=d.extra;l.monto+=d.extra;l.tasa=d.tasa;l.moraPct=d.mora;l.frecuencia=d.frecuencia;
+  l.proximoPago=nextDate(todayISO(),d.frecuencia);
+  l.fechaLimite=d.plazo>0?addPeriodos(todayISO(),d.frecuencia,d.plazo):"";l.plazo=d.plazo;
+  (l.eventos=l.eventos||[]).push({fecha:todayISO(),texto:"Refinanciado: "+d.tasa+"% "+freqLabel(d.frecuencia).toLowerCase()+
+    (d.extra>0?", +"+money(d.extra):"")+(d.plazo>0?", plazo "+d.plazo+" pagos":"")});
+  saveLoans();
 }
 function proyectarPagos(loan,pagoFijo,max){
   max=max||120;let saldo=loan.saldo,periodo=0,totalInteres=0;const filas=[];
@@ -250,7 +275,7 @@ function calcularDashboard(ls){
   const interesProyectado=act.reduce((s,l)=>s+calcCuotaMinima(l),0);
   return{capitalVigente,prestadoHistorico,gananciasGeneradas,porCobrar:capitalVigente+interesProyectado,
     prestamosActivos:act.length,prestamosPagados:pag.length,
-    vencidosCount:act.filter(l=>estadoPrestamo(l).tipo==="vencido").length};
+    vencidosCount:act.filter(l=>estadoPrestamo(l).tipo==="vencido").length,plazoVencidoCount:ls.filter(plazoVencido).length};
 }
 function linkWhatsApp(loan){
   const msg="Hola "+loan.nombre+", te recuerdo que tienes un pago pendiente. Saldo actual: "+money(loan.saldo)+
@@ -333,12 +358,22 @@ function vResumen(){
     stat("Ganancias generadas",money(s.gananciasGeneradas))+
     stat("Préstamos activos",s.prestamosActivos)+
     stat("Pagados por completo",s.prestamosPagados)+
-    stat("Vencidos",s.vencidosCount,{warn:s.vencidosCount>0})+'</div>';
+    stat("Vencidos",s.vencidosCount,{warn:s.vencidosCount>0})+
+    stat("Plazo vencido",s.plazoVencidoCount,{warn:s.plazoVencidoCount>0})+'</div>';
   b+='<h3 class="section">Alertas</h3>';
   b+=alertas.length?alertas.map(x=>'<div class="alert'+(x.e.tipo==="proximo"?" soon":"")+'" data-go="#/prestamo/'+x.l.id+'">'+
       '<span class="t"><b>'+esc(x.l.nombre)+'</b> · cuota mínima '+money(calcCuotaMinima(x.l))+'</span>'+
       '<span class="d">'+(x.e.tipo==="vencido"?"Vencido hace "+x.e.dias+"d":"Vence en "+x.e.dias+"d")+'</span></div>').join("")
     :'<p class="note">No hay pagos vencidos ni próximos a vencer.</p>';
+  const plazos=loans.filter(l=>l.estado==="activo"&&l.fechaLimite&&daysUntil(l.fechaLimite)<=15)
+    .sort((a,b)=>daysUntil(a.fechaLimite)-daysUntil(b.fechaLimite)).slice(0,5);
+  if(plazos.length){
+    b+='<h3 class="section">Plazos por terminar</h3>'+plazos.map(l=>{
+      const d=daysUntil(l.fechaLimite);
+      return '<div class="alert'+(d<0?"":" soon")+'" data-go="#/prestamo/'+l.id+'"><span class="t"><b>'+esc(l.nombre)+'</b> · plazo hasta '+fechaLegible(l.fechaLimite)+
+        ' · saldo '+money(l.saldo)+'</span><span class="d">'+(d<0?"Venció hace "+(-d)+"d":d===0?"Termina hoy":"Termina en "+d+"d")+'</span></div>';
+    }).join("");
+  }
   b+='<button class="linkbtn" data-go="#/prestamos">Ver todos los préstamos →</button>';
   shell("Libro de Préstamos",b,{tab:"resumen"});
 }
@@ -346,7 +381,7 @@ function vResumen(){
 function loanCard(l){
   const e=estadoPrestamo(l),act=l.estado==="activo";
   return '<div class="loan" data-go="#/prestamo/'+l.id+'"><div class="top"><div><div class="name">'+esc(l.nombre)+'</div>'+
-    '<div class="sub">'+money(l.monto)+' inicial · '+l.tasa+'% '+freqLabel(l.frecuencia)+'</div></div>'+stamp(e.tipo)+'</div>'+
+    '<div class="sub">'+money(l.monto)+' inicial · '+l.tasa+'% '+freqLabel(l.frecuencia)+(act&&l.fechaLimite?" · hasta "+fechaLegible(l.fechaLimite):"")+'</div></div>'+stamp(e.tipo)+'</div>'+
     '<div class="figs"><div><div class="fl">Saldo</div><div class="fv">'+money(l.saldo)+'</div></div>'+
     (act?'<div><div class="fl">Cuota mínima</div><div class="fv">'+money(calcCuotaMinima(l))+'</div></div>'+
          '<div><div class="fl">Próximo pago</div><div class="fv">'+fechaLegible(l.proximoPago)+'</div></div>'
@@ -369,16 +404,22 @@ function vDetalle(id){
   const abonado=l.pagos.reduce((s,p)=>s+p.monto,0),interes=l.pagos.reduce((s,p)=>s+p.interes+(p.mora||0),0);
   let b='<div class="head-row"><h2 class="title" style="margin:0">'+esc(l.nombre)+'</h2>'+stamp(e.tipo)+'</div>'+
     (l.categoria?'<div class="sub" style="font-size:12px;color:var(--inkSoft);margin-top:2px">'+esc(l.categoria)+'</div>':"")+
+    (plazoVencido(l)?'<div class="banner warn" style="margin-top:14px">El plazo terminó el '+fechaLegible(l.fechaLimite)+'. Puedes extenderlo o refinanciar el préstamo.</div>':"")+
     '<div class="summary">'+line("Monto original",money(l.monto))+line("Tasa",l.tasa+"% "+freqLabel(l.frecuencia))+
     (l.moraPct>0?line("Mora por atraso",l.moraPct+"%"):"")+line("Fecha del préstamo",fechaLegible(l.fechaInicio))+
     line("Saldo actual",money(l.saldo),true)+line("Total abonado",money(abonado))+line("Total interés cobrado",money(interes))+
-    (act?line("Próximo pago",fechaLegible(l.proximoPago)):"")+(l.nota?line("Nota",esc(l.nota)):"")+'</div>';
+    (act?line("Próximo pago",fechaLegible(l.proximoPago)):"")+
+    (act&&l.fechaLimite?line("Plazo hasta",fechaLegible(l.fechaLimite))+(periodosRestantes(l)?line("Pagos restantes",periodosRestantes(l))+line("Cuota sugerida",money(cuotaSugerida(l))):""):"")+(l.nota?line("Nota",esc(l.nota)):"")+'</div>';
   if(act){
     b+='<div class="row2 mt2"><button class="btn sec" data-go="#/pago/'+l.id+'">Registrar pago</button>'+
       '<a class="btn sec" href="'+linkWhatsApp(l)+'" target="_blank" rel="noopener">Recordar por WhatsApp</a></div>'+
-      '<button class="linkbtn mt" data-go="#/proyeccion/'+l.id+'">Ver proyección de pagos →</button>';
+      '<button class="linkbtn mt" data-go="#/proyeccion/'+l.id+'">Ver proyección de pagos →</button>'+
+      '<div class="row2 mt"><button class="btn sec" data-act="extender" data-id="'+l.id+'">Extender plazo</button>'+
+      '<button class="btn sec" data-go="#/refinanciar/'+l.id+'">Refinanciar</button></div>';
   }
   b+='<button class="btn danger mt2" data-act="borrar" data-id="'+l.id+'">Eliminar préstamo</button>';
+  if(l.eventos&&l.eventos.length)b+='<h3 class="section" style="margin-top:26px">Cambios al préstamo</h3>'+
+    l.eventos.slice().reverse().map(x=>'<div class="hist"><div><div class="d">'+esc(x.texto)+'</div><div class="s">'+fechaLegible(x.fecha)+'</div></div></div>').join("");
   b+='<h3 class="section" style="margin-top:26px">Historial de pagos</h3>';
   b+=l.pagos.length?l.pagos.slice().reverse().map(p=>'<div class="hist"><div><div class="d">'+fechaLegible(p.fecha)+'</div>'+
       '<div class="s">Interés '+money(p.interes)+(p.mora>0?" · Mora "+money(p.mora):"")+' · Capital '+money(p.capital)+'</div></div>'+
@@ -394,6 +435,7 @@ function vNuevo(){
     '<div class="field"><label for="n-tasa">Interés (%)</label><input class="mono" id="n-tasa" inputmode="decimal" placeholder="10"></div></div>'+
     '<div class="row2"><div class="field"><label for="n-mora">Mora (%) por atraso</label><input class="mono" id="n-mora" inputmode="decimal" placeholder="0"></div>'+
     '<div class="field"><label for="n-cat">Categoría</label><input id="n-cat" placeholder="Familia, negocio..." value="General"></div></div>'+
+    '<div class="field"><label for="n-plazo">Plazo: nº de pagos (opcional)</label><input class="mono" id="n-plazo" inputmode="numeric" placeholder="Ej: 6 pagos"></div>'+
     '<div class="field"><label>Frecuencia de pago</label><div class="chips" id="n-freq" data-value="mensual">'+
     [["semanal","Semanal"],["quincenal","Quincenal"],["mensual","Mensual"]].map(f=>'<button type="button" class="chip'+(f[0]==="mensual"?" active":"")+'" data-act="freq" data-v="'+f[0]+'">'+f[1]+'</button>').join("")+'</div></div>'+
     '<div class="field"><label for="n-fecha">Fecha del préstamo</label><input class="mono" id="n-fecha" type="date" value="'+todayISO()+'"></div>'+
@@ -441,6 +483,21 @@ function actualizarProyeccion(id){
     r.filas.map(f=>'<div class="tr"><span>'+f.periodo+'</span><span>'+money(f.interes)+'</span><span>'+money(f.capital)+'</span><span>'+money(f.saldo)+'</span></div>').join("");
 }
 
+function vRefi(id){
+  const l=loans.find(x=>x.id===id);if(!l||l.estado!=="activo"){nav("#/prestamos",true);return;}
+  const chips=[["semanal","Semanal"],["quincenal","Quincenal"],["mensual","Mensual"]].map(f=>'<button type="button" class="chip'+(f[0]===l.frecuencia?" active":"")+'" data-act="freq" data-v="'+f[0]+'">'+f[1]+'</button>').join("");
+  const b='<h2 class="title" style="font-size:19px">Refinanciar · '+esc(l.nombre)+'</h2>'+
+    '<p class="help">Saldo actual: <b>'+money(l.saldo)+'</b>. Se reinician las fechas de pago desde hoy con las nuevas condiciones; si había mora pendiente, queda en cero.</p>'+
+    '<div class="row2"><div class="field"><label for="r-tasa">Nuevo interés (%)</label><input class="mono" id="r-tasa" inputmode="decimal" value="'+l.tasa+'"></div>'+
+    '<div class="field"><label for="r-mora">Mora (%)</label><input class="mono" id="r-mora" inputmode="decimal" value="'+(l.moraPct||0)+'"></div></div>'+
+    moneyField("r-extra","Dinero adicional prestado (opcional)","0")+
+    '<div class="field"><label for="r-plazo">Nuevo plazo: nº de pagos (opcional)</label><input class="mono" id="r-plazo" inputmode="numeric" placeholder="Ej: 6"></div>'+
+    '<div class="field"><label>Frecuencia de pago</label><div class="chips" id="r-freq" data-value="'+l.frecuencia+'">'+chips+'</div></div>'+
+    '<div class="row2 mt2"><button class="btn sec" data-go="#/prestamo/'+l.id+'">Cancelar</button>'+
+    '<button class="btn" data-act="confirmar-refi" data-id="'+l.id+'">Refinanciar</button></div>';
+  shell("Refinanciar",b,{back:"#/prestamo/"+l.id});
+}
+
 function vAjustes(){
   const dc=diasDesdeCopia();
   const b='<h2 class="title" style="font-size:18px">Copia de seguridad</h2>'+
@@ -453,7 +510,7 @@ function vAjustes(){
     '<input type="file" id="a-file" accept=".json,application/json,text/plain" style="margin-bottom:10px">'+
     '<textarea class="mono" id="a-pegado" placeholder="[...]"></textarea>'+
     '<button class="btn sec mt" data-act="importar">Importar copia</button>'+
-    '<p class="help mt2" style="text-align:center">Libro de Préstamos · versión web 1.0</p>';
+    '<p class="help mt2" style="text-align:center">Libro de Préstamos · versión web 1.1</p>';
   shell("Ajustes",b,{tab:"ajustes"});
 }
 
@@ -468,6 +525,7 @@ function route(){
   else if(name==="nuevo")vNuevo();
   else if(name==="pago")vPago(id);
   else if(name==="proyeccion")vProyeccion(id);
+  else if(name==="refinanciar")vRefi(id);
   else vResumen();
 }
 function currentId(){return location.hash.split("/")[2]||location.hash.split("/")[1];}
@@ -480,7 +538,7 @@ document.addEventListener("click",async ev=>{
   const act=a.dataset.act;
 
   if(act==="filtro"){filtro=a.dataset.v;vLista();}
-  else if(act==="freq"){const box=document.getElementById("n-freq");box.dataset.value=a.dataset.v;
+  else if(act==="freq"){const box=a.closest(".chips");box.dataset.value=a.dataset.v;
     box.querySelectorAll(".chip").forEach(c=>c.classList.toggle("active",c===a));}
   else if(act==="ocultar-instalar"){meta.ocultarInstalar=true;saveMeta();vResumen();}
   else if(act==="guardar-nuevo"){
@@ -491,7 +549,7 @@ document.addEventListener("click",async ev=>{
     crearPrestamo({nombre,telefono:document.getElementById("n-tel").value.trim(),
       categoria:document.getElementById("n-cat").value.trim()||"General",monto,tasa,
       moraPct:num(document.getElementById("n-mora").value),frecuencia:document.getElementById("n-freq").dataset.value,
-      fechaInicio:fecha,nota:document.getElementById("n-nota").value.trim()});
+      fechaInicio:fecha,plazo:Math.max(0,parseInt(document.getElementById("n-plazo").value)||0),nota:document.getElementById("n-nota").value.trim()});
     toast("Préstamo guardado");nav("#/prestamos",true);
   }
   else if(act==="confirmar-pago"){
@@ -502,6 +560,19 @@ document.addEventListener("click",async ev=>{
       toast(l.saldo<=0?"Préstamo saldado por completo":"Pago registrado");
       nav("#/prestamo/"+l.id,true);}
     catch(e){toast("No se pudo registrar el pago");a.disabled=false;}
+  }
+  else if(act==="confirmar-refi"){
+    const tt=document.getElementById("r-tasa").value.trim(),tasa=num(tt);
+    if(tt===""||tasa<0){toast("Revisa el interés.");return;}
+    if(!confirm("Se reiniciarán las fechas de pago desde hoy con las nuevas condiciones. ¿Continuar?"))return;
+    refinanciar(a.dataset.id,{tasa,mora:num(document.getElementById("r-mora").value),extra:moneyVal("r-extra"),
+      plazo:Math.max(0,parseInt(document.getElementById("r-plazo").value)||0),frecuencia:document.getElementById("r-freq").dataset.value});
+    toast("Préstamo refinanciado");nav("#/prestamo/"+a.dataset.id,true);
+  }
+  else if(act==="extender"){
+    const t=prompt("¿Cuántos pagos más quieres agregar al plazo?","3");if(t===null)return;
+    const n=parseInt(t);if(!(n>0)){toast("Escribe un número mayor a 0.");return;}
+    extenderPlazo(a.dataset.id,n);toast("Plazo extendido");vDetalle(a.dataset.id);
   }
   else if(act==="borrar"){
     if(confirm("Se borrará este préstamo y todo su historial. No se puede deshacer.")){
