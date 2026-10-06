@@ -257,6 +257,14 @@ function refinanciar(id,d){
     (d.extra>0?", +"+money(d.extra):"")+(d.plazo>0?", plazo "+d.plazo+" pagos":"")});
   saveLoans();
 }
+// Ganancia esperada: con plazo, el interés que se cobraría hasta el final pagando la cuota sugerida;
+// sin plazo, solo el interés del próximo pago.
+function gananciaEsperada(l){
+  if(l.estado!=="activo")return 0;
+  const n=periodosRestantes(l);
+  if(n){return Math.max(0,cuotaSugerida(l)*n-l.saldo);}
+  return calcInteres(l);
+}
 function proyectarPagos(loan,pagoFijo,max){
   max=max||120;let saldo=loan.saldo,periodo=0,totalInteres=0;const filas=[];
   if(pagoFijo<=saldo*(loan.tasa/100))return{filas:[],totalInteres:null,periodos:null,imposible:true};
@@ -275,7 +283,8 @@ function calcularDashboard(ls){
   const interesProyectado=act.reduce((s,l)=>s+calcCuotaMinima(l),0);
   return{capitalVigente,prestadoHistorico,gananciasGeneradas,porCobrar:capitalVigente+interesProyectado,
     prestamosActivos:act.length,prestamosPagados:pag.length,
-    vencidosCount:act.filter(l=>estadoPrestamo(l).tipo==="vencido").length,plazoVencidoCount:ls.filter(plazoVencido).length};
+    vencidosCount:act.filter(l=>estadoPrestamo(l).tipo==="vencido").length,plazoVencidoCount:ls.filter(plazoVencido).length,
+    gananciaEsperada:act.reduce((s,l)=>s+gananciaEsperada(l),0)};
 }
 function linkWhatsApp(loan){
   const msg="Hola "+loan.nombre+", te recuerdo que tienes un pago pendiente. Saldo actual: "+money(loan.saldo)+
@@ -353,6 +362,7 @@ function vResumen(){
   }
   b+='<h2 class="title">Resumen general</h2><div class="grid">'+
     stat("Capital vigente",money(s.capitalVigente),{wide:1})+
+    stat("Ganancia esperada",money(s.gananciaEsperada),{wide:1})+
     stat("Por cobrar ahora",money(s.porCobrar))+
     stat("Prestado histórico",money(s.prestadoHistorico))+
     stat("Ganancias generadas",money(s.gananciasGeneradas))+
@@ -407,7 +417,7 @@ function vDetalle(id){
     (plazoVencido(l)?'<div class="banner warn" style="margin-top:14px">El plazo terminó el '+fechaLegible(l.fechaLimite)+'. Puedes extenderlo o refinanciar el préstamo.</div>':"")+
     '<div class="summary">'+line("Monto original",money(l.monto))+line("Tasa",l.tasa+"% "+freqLabel(l.frecuencia))+
     (l.moraPct>0?line("Mora por atraso",l.moraPct+"%"):"")+line("Fecha del préstamo",fechaLegible(l.fechaInicio))+
-    line("Saldo actual",money(l.saldo),true)+line("Total abonado",money(abonado))+line("Total interés cobrado",money(interes))+
+    line("Saldo actual",money(l.saldo),true)+line("Total abonado",money(abonado))+line("Total interés cobrado",money(interes))+(act?line("Ganancia esperada",money(gananciaEsperada(l))):"")+
     (act?line("Próximo pago",fechaLegible(l.proximoPago)):"")+
     (act&&l.fechaLimite?line("Plazo hasta",fechaLegible(l.fechaLimite))+(periodosRestantes(l)?line("Pagos restantes",periodosRestantes(l))+line("Cuota sugerida",money(cuotaSugerida(l))):""):"")+(l.nota?line("Nota",esc(l.nota)):"")+'</div>';
   if(act){
