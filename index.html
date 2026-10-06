@@ -427,7 +427,8 @@ function vDetalle(id){
       '<div class="row2 mt"><button class="btn sec" data-act="extender" data-id="'+l.id+'">Extender plazo</button>'+
       '<button class="btn sec" data-go="#/refinanciar/'+l.id+'">Refinanciar</button></div>';
   }
-  b+='<button class="btn danger mt2" data-act="borrar" data-id="'+l.id+'">Eliminar préstamo</button>';
+  b+='<div class="row2 mt2"><button class="btn sec" data-go="#/editar/'+l.id+'">Editar</button>'+
+    '<button class="btn danger" data-act="borrar" data-id="'+l.id+'">Eliminar</button></div>';
   if(l.eventos&&l.eventos.length)b+='<h3 class="section" style="margin-top:26px">Cambios al préstamo</h3>'+
     l.eventos.slice().reverse().map(x=>'<div class="hist"><div><div class="d">'+esc(x.texto)+'</div><div class="s">'+fechaLegible(x.fecha)+'</div></div></div>').join("");
   b+='<h3 class="section" style="margin-top:26px">Historial de pagos</h3>';
@@ -508,6 +509,26 @@ function vRefi(id){
   shell("Refinanciar",b,{back:"#/prestamo/"+l.id});
 }
 
+function vEditar(id){
+  const l=loans.find(x=>x.id===id);if(!l){nav("#/prestamos",true);return;}
+  const act=l.estado==="activo",sinPagos=!l.pagos.length;
+  const chips=[["semanal","Semanal"],["quincenal","Quincenal"],["mensual","Mensual"]].map(f=>'<button type="button" class="chip'+(f[0]===l.frecuencia?" active":"")+'" data-act="freq" data-v="'+f[0]+'">'+f[1]+'</button>').join("");
+  const b='<div class="field"><label for="e-nombre">Nombre</label><input id="e-nombre" value="'+esc(l.nombre)+'"></div>'+
+    '<div class="field"><label for="e-tel">Teléfono</label><input id="e-tel" type="tel" inputmode="tel" value="'+esc(l.telefono)+'"></div>'+
+    '<div class="field"><label for="e-cat">Categoría</label><input id="e-cat" value="'+esc(l.categoria)+'"></div>'+
+    (sinPagos?moneyField("e-monto","Monto prestado","1.000.000"):"")+
+    '<div class="row2"><div class="field"><label for="e-tasa">Interés (%)</label><input class="mono" id="e-tasa" inputmode="decimal" value="'+l.tasa+'"></div>'+
+    '<div class="field"><label for="e-mora">Mora (%)</label><input class="mono" id="e-mora" inputmode="decimal" value="'+(l.moraPct||0)+'"></div></div>'+
+    '<div class="field"><label>Frecuencia de pago</label><div class="chips" id="e-freq" data-value="'+l.frecuencia+'">'+chips+'</div></div>'+
+    (act?'<div class="field"><label for="e-prox">Próximo pago</label><input class="mono" id="e-prox" type="date" value="'+l.proximoPago+'"></div>'+
+    '<div class="field"><label for="e-lim">Fecha límite del plazo (opcional)</label><input class="mono" id="e-lim" type="date" value="'+(l.fechaLimite||"")+'"></div>':"")+
+    '<div class="field"><label for="e-nota">Nota</label><input id="e-nota" value="'+esc(l.nota)+'"></div>'+
+    '<p class="help">Si cambias la frecuencia, ajusta también la fecha del próximo pago. El monto solo se puede editar mientras no haya pagos registrados.</p>'+
+    '<div class="row2"><button class="btn sec" data-go="#/prestamo/'+l.id+'">Cancelar</button><button class="btn" data-act="guardar-edit" data-id="'+l.id+'">Guardar cambios</button></div>';
+  shell("Editar préstamo",b,{back:"#/prestamo/"+l.id});
+  const m=document.getElementById("e-monto");if(m){m.dataset.raw=l.monto;m.value=Number(l.monto).toLocaleString("es-CO");}
+}
+
 function vAjustes(){
   const dc=diasDesdeCopia();
   const b='<h2 class="title" style="font-size:18px">Copia de seguridad</h2>'+
@@ -536,6 +557,7 @@ function route(){
   else if(name==="pago")vPago(id);
   else if(name==="proyeccion")vProyeccion(id);
   else if(name==="refinanciar")vRefi(id);
+  else if(name==="editar")vEditar(id);
   else vResumen();
 }
 function currentId(){return location.hash.split("/")[2]||location.hash.split("/")[1];}
@@ -583,6 +605,19 @@ document.addEventListener("click",async ev=>{
     const t=prompt("¿Cuántos pagos más quieres agregar al plazo?","3");if(t===null)return;
     const n=parseInt(t);if(!(n>0)){toast("Escribe un número mayor a 0.");return;}
     extenderPlazo(a.dataset.id,n);toast("Plazo extendido");vDetalle(a.dataset.id);
+  }
+  else if(act==="guardar-edit"){
+    const l=loans.find(x=>x.id===a.dataset.id);if(!l)return;
+    const nombre=document.getElementById("e-nombre").value.trim(),tt=document.getElementById("e-tasa").value.trim(),tasa=num(tt),
+      sinPagos=!l.pagos.length,m=sinPagos?moneyVal("e-monto"):l.monto;
+    if(!nombre||tt===""||tasa<0||m<=0){toast("Revisa nombre, monto e interés.");return;}
+    l.nombre=nombre;l.telefono=document.getElementById("e-tel").value.trim();
+    l.categoria=document.getElementById("e-cat").value.trim()||"General";l.nota=document.getElementById("e-nota").value.trim();
+    l.tasa=tasa;l.moraPct=num(document.getElementById("e-mora").value);l.frecuencia=document.getElementById("e-freq").dataset.value;
+    if(sinPagos){l.monto=m;l.saldo=m;}
+    if(l.estado==="activo"){const pp=document.getElementById("e-prox").value;if(pp)l.proximoPago=pp;
+      l.fechaLimite=document.getElementById("e-lim").value||"";}
+    if(saveLoans()){toast("Cambios guardados");nav("#/prestamo/"+l.id,true);}
   }
   else if(act==="borrar"){
     if(confirm("Se borrará este préstamo y todo su historial. No se puede deshacer.")){
