@@ -1,6 +1,6 @@
 // Service worker: guarda la app en el teléfono para que abra sin internet.
 // Si cambias algún archivo, sube el número de VERSION para que el iPhone se actualice.
-const VERSION = "libro-prestamos-v5";
+const VERSION = "libro-prestamos-v6";
 const ARCHIVOS = [
   "./",
   "./index.html",

@@ -118,6 +118,11 @@ input,textarea{width:100%;background:var(--card);border:1px solid var(--line);bo
 input.mono,textarea.mono{font-family:var(--mono)}
 input[type=date]{min-height:48px}
 textarea{min-height:130px;font-size:12px;font-family:var(--mono);resize:vertical}
+select{width:100%;background:var(--card);border:1px solid var(--line);border-radius:8px;padding:12px;font-size:16px;color:var(--ink)}
+input[type=checkbox]{-webkit-appearance:checkbox;appearance:auto;width:22px;height:22px;padding:0;flex:none}
+#lock{display:none;position:fixed;inset:0;z-index:100;background:var(--green);color:var(--paper);flex-direction:column;align-items:center;justify-content:center;padding:24px;text-align:center;gap:12px}
+#lock input{max-width:220px;text-align:center;font-size:28px;letter-spacing:8px}
+#lock button{background:none;border:0;color:var(--paper);opacity:.8;text-decoration:underline;padding:8px}
 .chips{display:flex;gap:8px;flex-wrap:wrap}
 .chip{padding:8px 14px;border-radius:20px;border:1px solid var(--line);background:none;color:var(--inkSoft);
   font-size:13px;font-weight:600;cursor:pointer}
@@ -191,7 +196,9 @@ function num(v){const n=parseFloat(String(v||"").replace(",","."));return Number
 const KEY="@libro_prestamos:loans", META="@libro_prestamos:meta";
 let loans=[], meta={};
 function loadAll(){
-  try{const a=JSON.parse(localStorage.getItem(KEY)||"[]");loans=Array.isArray(a)?a:[];}catch(e){loans=[];}
+  try{const a=JSON.parse(localStorage.getItem(KEY)||"[]");loans=Array.isArray(a)?a:[];}
+  catch(e){try{localStorage.setItem(KEY+"_corrupto",localStorage.getItem(KEY));}catch(_){}loans=[];}
+  loans.forEach(l=>{l.pagos=l.pagos||[];l.eventos=l.eventos||[];l.fechaLimite=l.fechaLimite||"";});
   try{meta=JSON.parse(localStorage.getItem(META)||"{}")||{};}catch(e){meta={};}
 }
 function saveLoans(){
@@ -218,7 +225,7 @@ function estadoPrestamo(l){
 function crearPrestamo(d){
   const loan={id:uid(),nombre:d.nombre,telefono:d.telefono||"",categoria:d.categoria||"General",monto:d.monto,tasa:d.tasa,
     moraPct:d.moraPct||0,frecuencia:d.frecuencia,fechaInicio:d.fechaInicio,nota:d.nota||"",saldo:d.monto,
-    proximoPago:nextDate(d.fechaInicio,d.frecuencia),estado:"activo",pagos:[],plazo:d.plazo||0,
+    proximoPago:nextDate(d.fechaInicio,d.frecuencia),estado:"activo",pagos:[],parcialNoAvanza:!!d.parcialNoAvanza,plazo:d.plazo||0,
     fechaLimite:d.plazo>0?addPeriodos(d.fechaInicio,d.frecuencia,d.plazo):"",eventos:[]};
   loans.push(loan);saveLoans();return loan;
 }
@@ -228,9 +235,9 @@ function registrarPago(id,monto,fecha){
   const interes=calcInteres(loan),mora=calcMora(loan),capital=monto-(interes+mora);
   let nuevo=loan.saldo-capital;if(nuevo<1)nuevo=0;
   loan.pagos.push({id:uid(),fecha,monto,interes:Math.round(interes),mora:Math.round(mora),
-    capital:Math.round(capital),saldoRestante:Math.round(nuevo)});
+    capital:Math.round(capital),saldoRestante:Math.round(nuevo),prevSaldo:loan.saldo,prevProximo:loan.proximoPago});
   loan.saldo=nuevo;
-  if(nuevo<=0)loan.estado="pagado";else loan.proximoPago=nextDate(loan.proximoPago,loan.frecuencia);
+  if(nuevo<=0)loan.estado="pagado";else if(!(loan.parcialNoAvanza&&monto<interes+mora))loan.proximoPago=nextDate(loan.proximoPago,loan.frecuencia);
   saveLoans();return loan;
 }
 function addPeriodos(iso,f,n){if(f==="semanal")return addDaysISO(iso,7*n);if(f==="quincenal")return addDaysISO(iso,15*n);return addMonthsISO(iso,n);}
@@ -265,6 +272,21 @@ function gananciaEsperada(l){
   if(n){return Math.max(0,cuotaSugerida(l)*n-l.saldo);}
   return calcInteres(l);
 }
+function anularUltimoPago(id){
+  const l=loans.find(x=>x.id===id);if(!l||!l.pagos.length)return false;
+  const p=l.pagos.pop();
+  l.saldo=p.prevSaldo!=null?p.prevSaldo:p.saldoRestante+p.capital;
+  l.proximoPago=p.prevProximo||(l.estado==="pagado"?l.proximoPago:addPeriodos(l.proximoPago,l.frecuencia,-1));
+  l.estado="activo";
+  (l.eventos=l.eventos||[]).push({fecha:todayISO(),texto:"Pago anulado: "+money(p.monto)+" del "+fechaLegible(p.fecha)});
+  return saveLoans();
+}
+function waUrl(l,msg){let t=(l.telefono||"").replace(/[^0-9]/g,"");if(t.length===10&&t[0]==="3")t="57"+t;return "https://wa.me/"+t+"?text="+encodeURIComponent(msg);}
+function linkComprobante(l,p){
+  return waUrl(l,"Hola "+l.nombre+", confirmo tu pago del "+fechaLegible(p.fecha)+":\n• Valor recibido: "+money(p.monto)+"\n• Interés: "+money(p.interes)+
+    (p.mora>0?"\n• Mora: "+money(p.mora):"")+"\n• Abono a capital: "+money(p.capital)+"\n• Saldo restante: "+money(p.saldoRestante)+
+    (l.estado==="activo"?"\n• Próximo pago: "+fechaLegible(l.proximoPago):"\n¡Préstamo saldado!")+"\nGracias.");
+}
 function proyectarPagos(loan,pagoFijo,max){
   max=max||120;let saldo=loan.saldo,periodo=0,totalInteres=0;const filas=[];
   if(pagoFijo<=saldo*(loan.tasa/100))return{filas:[],totalInteres:null,periodos:null,imposible:true};
@@ -295,8 +317,9 @@ function linkWhatsApp(loan){
 }
 
 /* ---------- Copia de seguridad ---------- */
-function backupJSON(){return JSON.stringify(loans);}
+function backupJSON(){return JSON.stringify({version:2,exportado:todayISO(),prestamos:loans});}
 function validarCopia(data){
+  if(data&&!Array.isArray(data)&&Array.isArray(data.prestamos))data=data.prestamos;
   if(!Array.isArray(data))throw new Error("formato");
   return data.map(l=>{
     if(!l||typeof l!=="object"||!l.id||typeof l.nombre!=="string"||!isFinite(l.monto)||!isFinite(l.saldo)||!l.proximoPago)
@@ -339,6 +362,7 @@ function line(l,v,bold){return '<div class="line'+(bold?" bold":"")+'"><span>'+l
 function moneyField(id,label,ph){
   return '<div class="field"><label for="'+id+'">'+label+'</label><input class="mono" id="'+id+'" inputmode="numeric" placeholder="'+ph+'" autocomplete="off" data-money></div>';
 }
+function chk(id,on){return '<label style="display:flex;gap:10px;align-items:center;font-size:13px;margin-bottom:14px"><input type="checkbox" id="'+id+'"'+(on?" checked":"")+'> No avanzar la fecha de pago si el abono no cubre el interés</label>';}
 function moneyVal(id){const el=document.getElementById(id);return el?Number(el.dataset.raw||0):0;}
 
 /* ---------- Pantallas ---------- */
@@ -370,6 +394,13 @@ function vResumen(){
     stat("Pagados por completo",s.prestamosPagados)+
     stat("Vencidos",s.vencidosCount,{warn:s.vencidosCount>0})+
     stat("Plazo vencido",s.plazoVencidoCount,{warn:s.plazoVencidoCount>0})+'</div>';
+  const cobros=loans.filter(l=>{const d=daysUntil(l.proximoPago);return l.estado==="activo"&&d>=0&&d<=7;})
+    .sort((a,b)=>parseDate(a.proximoPago)-parseDate(b.proximoPago));
+  if(cobros.length)b+='<h3 class="section">Cobros de la semana</h3>'+cobros.map(l=>{const d=daysUntil(l.proximoPago);
+    return '<div class="hist"><div><div class="d"><b>'+esc(l.nombre)+'</b> · '+money(calcCuotaMinima(l))+'</div><div class="s">'+
+      (d===0?"Hoy":d===1?"Mañana":"En "+d+" días · "+fechaLegible(l.proximoPago))+'</div></div>'+
+      '<div style="display:flex;gap:6px;align-items:center"><button class="btn sec small" style="width:auto;margin:0;padding:8px 10px" data-go="#/pago/'+l.id+'">Pagar</button>'+
+      '<a class="btn sec small" style="width:auto;margin:0;padding:8px 10px" href="'+linkWhatsApp(l)+'" target="_blank" rel="noopener">WhatsApp</a></div></div>';}).join("");
   b+='<h3 class="section">Alertas</h3>';
   b+=alertas.length?alertas.map(x=>'<div class="alert'+(x.e.tipo==="proximo"?" soon":"")+'" data-go="#/prestamo/'+x.l.id+'">'+
       '<span class="t"><b>'+esc(x.l.nombre)+'</b> · cuota mínima '+money(calcCuotaMinima(x.l))+'</span>'+
@@ -398,13 +429,22 @@ function loanCard(l){
         :'<div><div class="fl">Total pagos</div><div class="fv">'+l.pagos.length+'</div></div>')+'</div>'+
     (act?'<button class="btn small" data-go="#/pago/'+l.id+'">Registrar pago</button>':"")+'</div>';
 }
-function vLista(){
-  const vis=loans.filter(l=>filtro==="activos"?l.estado==="activo":l.estado==="pagado")
+let busq="",catF="";
+function listaHTML(){
+  const q=busq.trim().toLowerCase();
+  const vis=loans.filter(l=>(filtro==="activos"?l.estado==="activo":l.estado==="pagado")&&(!q||l.nombre.toLowerCase().includes(q))&&(!catF||l.categoria===catF))
     .sort((a,b)=>filtro==="activos"?parseDate(a.proximoPago)-parseDate(b.proximoPago):0);
+  return vis.length?vis.map(loanCard).join(""):'<p class="note">'+(busq||catF?"No hay resultados con ese filtro.":(filtro==="activos"
+    ?"Aún no tienes préstamos activos. Toca + para agregar el primero.":"Todavía no hay préstamos pagados por completo."))+'</p>';
+}
+function vLista(){
+  const cats=[...new Set(loans.map(l=>l.categoria).filter(Boolean))];
   const b='<div class="pills"><button class="pill'+(filtro==="activos"?" active":"")+'" data-act="filtro" data-v="activos">Activos</button>'+
     '<button class="pill'+(filtro==="pagados"?" active":"")+'" data-act="filtro" data-v="pagados">Pagados</button></div>'+
-    (vis.length?vis.map(loanCard).join(""):'<p class="note">'+(filtro==="activos"
-      ?"Aún no tienes préstamos activos. Toca + para agregar el primero.":"Todavía no hay préstamos pagados por completo.")+'</p>');
+    '<input id="q" placeholder="Buscar por nombre" value="'+esc(busq)+'" style="margin-bottom:10px">'+
+    (cats.length>1?'<select id="cat-f" style="margin-bottom:12px"><option value="">Todas las categorías</option>'+
+      cats.map(c=>'<option'+(c===catF?" selected":"")+'>'+esc(c)+'</option>').join("")+'</select>':"")+
+    '<div id="lista">'+listaHTML()+'</div>';
   shell("Préstamos",b,{tab:"prestamos",fab:true});
 }
 
@@ -432,8 +472,9 @@ function vDetalle(id){
   if(l.eventos&&l.eventos.length)b+='<h3 class="section" style="margin-top:26px">Cambios al préstamo</h3>'+
     l.eventos.slice().reverse().map(x=>'<div class="hist"><div><div class="d">'+esc(x.texto)+'</div><div class="s">'+fechaLegible(x.fecha)+'</div></div></div>').join("");
   b+='<h3 class="section" style="margin-top:26px">Historial de pagos</h3>';
+  if(l.pagos.length)b+='<button class="btn danger small" style="margin:0 0 10px" data-act="anular-pago" data-id="'+l.id+'">Anular último pago</button>';
   b+=l.pagos.length?l.pagos.slice().reverse().map(p=>'<div class="hist"><div><div class="d">'+fechaLegible(p.fecha)+'</div>'+
-      '<div class="s">Interés '+money(p.interes)+(p.mora>0?" · Mora "+money(p.mora):"")+' · Capital '+money(p.capital)+'</div></div>'+
+      '<div class="s">Interés '+money(p.interes)+(p.mora>0?" · Mora "+money(p.mora):"")+' · Capital '+money(p.capital)+'</div><a class="s" style="color:var(--green);font-weight:600;display:inline-block;margin-top:4px" href="'+linkComprobante(l,p)+'" target="_blank" rel="noopener">Enviar comprobante</a></div>'+
       '<div class="a">'+money(p.monto)+'</div></div>').join("")
     :'<p class="note">Todavía no hay pagos registrados.</p>';
   shell("Detalle",b,{back:"#/prestamos"});
@@ -451,7 +492,7 @@ function vNuevo(){
     [["semanal","Semanal"],["quincenal","Quincenal"],["mensual","Mensual"]].map(f=>'<button type="button" class="chip'+(f[0]==="mensual"?" active":"")+'" data-act="freq" data-v="'+f[0]+'">'+f[1]+'</button>').join("")+'</div></div>'+
     '<div class="field"><label for="n-fecha">Fecha del préstamo</label><input class="mono" id="n-fecha" type="date" value="'+todayISO()+'"></div>'+
     '<div class="field"><label for="n-nota">Nota (opcional)</label><input id="n-nota" placeholder="Ej: préstamo para moto"></div>'+
-    '<button class="btn" data-act="guardar-nuevo">Guardar préstamo</button>';
+    chk("n-parcial",false)+'<button class="btn" data-act="guardar-nuevo">Guardar préstamo</button>';
   shell("Nuevo préstamo",b,{back:"#/prestamos"});
 }
 
@@ -523,7 +564,7 @@ function vEditar(id){
     (act?'<div class="field"><label for="e-prox">Próximo pago</label><input class="mono" id="e-prox" type="date" value="'+l.proximoPago+'"></div>'+
     '<div class="field"><label for="e-lim">Fecha límite del plazo (opcional)</label><input class="mono" id="e-lim" type="date" value="'+(l.fechaLimite||"")+'"></div>':"")+
     '<div class="field"><label for="e-nota">Nota</label><input id="e-nota" value="'+esc(l.nota)+'"></div>'+
-    '<p class="help">Si cambias la frecuencia, ajusta también la fecha del próximo pago. El monto solo se puede editar mientras no haya pagos registrados.</p>'+
+    chk("e-parcial",l.parcialNoAvanza)+'<p class="help">Si cambias la frecuencia, ajusta también la fecha del próximo pago. El monto solo se puede editar mientras no haya pagos registrados.</p>'+
     '<div class="row2"><button class="btn sec" data-go="#/prestamo/'+l.id+'">Cancelar</button><button class="btn" data-act="guardar-edit" data-id="'+l.id+'">Guardar cambios</button></div>';
   shell("Editar préstamo",b,{back:"#/prestamo/"+l.id});
   const m=document.getElementById("e-monto");if(m){m.dataset.raw=l.monto;m.value=Number(l.monto).toLocaleString("es-CO");}
@@ -536,15 +577,27 @@ function vAjustes(){
     (dc===null?" <b>Aún no has hecho ninguna.</b>":" Última copia: hace "+dc+" día(s).")+'</p>'+
     '<button class="btn" data-act="exportar">Guardar / compartir copia</button>'+
     '<button class="btn sec mt" data-act="copiar">Copiar copia al portapapeles</button>'+
+    '<h2 class="title" style="font-size:18px;margin-top:30px">Bloqueo con PIN</h2>'+
+    (meta.pinHash?'<p class="help">El PIN está activo: se pide al abrir la app y al volver tras unos segundos.</p><button class="btn sec" data-act="pin-off">Quitar PIN</button>'
+    :'<p class="help">Pide un PIN de 4 a 6 dígitos al abrir la app. Frena el acceso casual; no cifra tus datos.</p><input class="mono" id="a-pin" type="password" inputmode="numeric" maxlength="6" placeholder="4 a 6 dígitos"><button class="btn mt" data-act="pin-set">Activar PIN</button>')+
     '<h2 class="title mt2" style="font-size:18px;margin-top:30px">Restaurar copia</h2>'+
     '<p class="help">Elige el archivo de una copia anterior, o pega aquí su contenido. También sirve para traer los datos de la versión Expo.</p>'+
     '<input type="file" id="a-file" accept=".json,application/json,text/plain" style="margin-bottom:10px">'+
     '<textarea class="mono" id="a-pegado" placeholder="[...]"></textarea>'+
     '<button class="btn sec mt" data-act="importar">Importar copia</button>'+
-    '<p class="help mt2" style="text-align:center">Libro de Préstamos · versión web 1.1</p>';
+    '<p class="help mt2" style="text-align:center">Libro de Préstamos · versión web 1.2</p>';
   shell("Ajustes",b,{tab:"ajustes"});
 }
 
+let hiddenAt=Date.now();
+async function sha(t){const b=await crypto.subtle.digest("SHA-256",new TextEncoder().encode("lp:"+t));return Array.from(new Uint8Array(b)).map(x=>x.toString(16).padStart(2,"0")).join("");}
+function showLock(){
+  let el=document.getElementById("lock");if(!el){el=document.createElement("div");el.id="lock";document.body.appendChild(el);}
+  el.innerHTML='<h2 class="title" style="color:var(--paper);margin:0">Libro de Préstamos</h2><p style="margin:0;opacity:.85">Escribe tu PIN</p>'+
+    '<input id="lock-pin" type="password" inputmode="numeric" maxlength="'+(meta.pinLen||6)+'" autocomplete="off"><div id="lock-err" style="min-height:20px;color:#F6C9C2"></div>'+
+    '<button data-act="olvide-pin">Olvidé mi PIN</button>';
+  el.style.display="flex";setTimeout(()=>{const i=document.getElementById("lock-pin");if(i)i.focus();},50);
+}
 /* ---------- Router ---------- */
 function route(){
   const parts=location.hash.replace(/^#\/?/,"").split("/"),name=parts[0]||"",id=parts[1];
@@ -581,7 +634,7 @@ document.addEventListener("click",async ev=>{
     crearPrestamo({nombre,telefono:document.getElementById("n-tel").value.trim(),
       categoria:document.getElementById("n-cat").value.trim()||"General",monto,tasa,
       moraPct:num(document.getElementById("n-mora").value),frecuencia:document.getElementById("n-freq").dataset.value,
-      fechaInicio:fecha,plazo:Math.max(0,parseInt(document.getElementById("n-plazo").value)||0),nota:document.getElementById("n-nota").value.trim()});
+      fechaInicio:fecha,parcialNoAvanza:document.getElementById("n-parcial").checked,plazo:Math.max(0,parseInt(document.getElementById("n-plazo").value)||0),nota:document.getElementById("n-nota").value.trim()});
     toast("Préstamo guardado");nav("#/prestamos",true);
   }
   else if(act==="confirmar-pago"){
@@ -613,11 +666,28 @@ document.addEventListener("click",async ev=>{
     if(!nombre||tt===""||tasa<0||m<=0){toast("Revisa nombre, monto e interés.");return;}
     l.nombre=nombre;l.telefono=document.getElementById("e-tel").value.trim();
     l.categoria=document.getElementById("e-cat").value.trim()||"General";l.nota=document.getElementById("e-nota").value.trim();
-    l.tasa=tasa;l.moraPct=num(document.getElementById("e-mora").value);l.frecuencia=document.getElementById("e-freq").dataset.value;
+    l.tasa=tasa;l.parcialNoAvanza=document.getElementById("e-parcial").checked;l.moraPct=num(document.getElementById("e-mora").value);l.frecuencia=document.getElementById("e-freq").dataset.value;
     if(sinPagos){l.monto=m;l.saldo=m;}
     if(l.estado==="activo"){const pp=document.getElementById("e-prox").value;if(pp)l.proximoPago=pp;
       l.fechaLimite=document.getElementById("e-lim").value||"";}
     if(saveLoans()){toast("Cambios guardados");nav("#/prestamo/"+l.id,true);}
+  }
+  else if(act==="anular-pago"){
+    if(confirm("Se anulará el último pago: el saldo y la fecha de pago vuelven a como estaban. ¿Continuar?")){
+      anularUltimoPago(a.dataset.id);toast("Pago anulado");vDetalle(a.dataset.id);}
+  }
+  else if(act==="pin-set"){
+    const v=document.getElementById("a-pin").value;
+    if(!/^\d{4,6}$/.test(v)){toast("El PIN debe tener de 4 a 6 números.");return;}
+    meta.pinHash=await sha(v);meta.pinLen=v.length;saveMeta();toast("PIN activado");vAjustes();
+  }
+  else if(act==="pin-off"){
+    const v=prompt("Escribe tu PIN actual para quitarlo");if(v===null)return;
+    if(await sha(v)===meta.pinHash){delete meta.pinHash;delete meta.pinLen;saveMeta();toast("PIN quitado");vAjustes();}else toast("PIN incorrecto");
+  }
+  else if(act==="olvide-pin"){
+    if(confirm("Esto BORRA todos los préstamos de este teléfono. Hazlo solo si tienes una copia de seguridad para importar. ¿Borrar todo?")){
+      try{localStorage.removeItem(KEY);localStorage.removeItem(META);}catch(e){}location.reload();}
   }
   else if(act==="borrar"){
     if(confirm("Se borrará este préstamo y todo su historial. No se puede deshacer.")){
@@ -657,6 +727,13 @@ document.addEventListener("click",async ev=>{
 
 document.addEventListener("input",ev=>{
   const t=ev.target;
+  if(t.id==="lock-pin"){
+    if(t.value.length>=(meta.pinLen||4))sha(t.value).then(h=>{
+      if(h===meta.pinHash){document.getElementById("lock").style.display="none";}
+      else{t.value="";document.getElementById("lock-err").textContent="PIN incorrecto";}});
+    return;
+  }
+  if(t.id==="q"){busq=t.value;document.getElementById("lista").innerHTML=listaHTML();return;}
   if(t.hasAttribute&&t.hasAttribute("data-money")){
     const d=t.value.replace(/\D/g,"").replace(/^0+(?=\d)/,"");
     t.dataset.raw=d;t.value=d?Number(d).toLocaleString("es-CO"):"";
@@ -665,10 +742,15 @@ document.addEventListener("input",ev=>{
   }
 });
 
+document.addEventListener("change",ev=>{
+  if(ev.target.id==="cat-f"){catF=ev.target.value;document.getElementById("lista").innerHTML=listaHTML();}
+});
 window.addEventListener("hashchange",route);
 // Al volver a abrir la app desde segundo plano, refresca (por si cambió el día).
 document.addEventListener("visibilitychange",()=>{
+  if(document.visibilityState==="hidden")hiddenAt=Date.now();
   if(document.visibilityState==="visible"){
+    if(meta.pinHash&&Date.now()-hiddenAt>30000)showLock();
     const h=location.hash;
     if(h===""||h==="#/"||h==="#/prestamos")route();
   }
@@ -677,6 +759,7 @@ document.addEventListener("visibilitychange",()=>{
 /* ---------- Arranque ---------- */
 loadAll();
 route();
+if(meta.pinHash)showLock();
 if(navigator.storage&&navigator.storage.persist){navigator.storage.persist().catch(()=>{});}
 if("serviceWorker" in navigator&&(location.protocol==="https:"||location.hostname==="localhost")){
   window.addEventListener("load",()=>navigator.serviceWorker.register("sw.js").catch(()=>{}));
