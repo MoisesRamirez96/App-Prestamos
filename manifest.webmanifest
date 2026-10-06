@@ -1,0 +1,16 @@
+{
+  "name": "Libro de Préstamos",
+  "short_name": "Préstamos",
+  "description": "Gestiona tus préstamos personales: intereses, mora, pagos y alertas.",
+  "start_url": "./index.html",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#F2EDE1",
+  "theme_color": "#1F4D3A",
+  "lang": "es-CO",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" }
+  ]
+}
